@@ -21,36 +21,57 @@ jobs:
       - name: Set version
         id: vars
         run: |
+          set -eo pipefail
           VERSION="${{ github.event.client_payload.version || github.event.inputs.version }}"
-          # Strip leading 'v' if present
           VERSION="${VERSION#v}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Download checksums
         run: |
-          curl -sL "https://github.com/luno/luno-mcp/releases/download/v${{ steps.vars.outputs.version }}/checksums.txt" \
+          set -eo pipefail
+          curl -fsSL "https://github.com/luno/luno-mcp/releases/download/v${{ steps.vars.outputs.version }}/checksums.txt" \
             -o checksums.txt
           cat checksums.txt
 
       - name: Extract SHAs
         id: shas
         run: |
-          echo "darwin_arm64=$(grep darwin-arm64 checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "darwin_amd64=$(grep darwin-amd64 checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "linux_arm64=$(grep linux-arm64 checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "linux_amd64=$(grep linux-amd64 checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
+          set -eo pipefail
+          while IFS=" " read -r sha filename; do
+            platform=$(echo "$filename" | sed 's/luno-mcp-//;s/\.tar\.gz//')
+            key="${platform//-/_}"
+            echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
+          done < checksums.txt
 
       - name: Update formula
         run: |
+          set -eo pipefail
           VERSION="${{ steps.vars.outputs.version }}"
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/luno-mcp.rb
-          sed -i "s/PLACEHOLDER_DARWIN_ARM64_SHA256/${{ steps.shas.outputs.darwin_arm64 }}/" Formula/luno-mcp.rb
-          sed -i "s/PLACEHOLDER_DARWIN_AMD64_SHA256/${{ steps.shas.outputs.darwin_amd64 }}/" Formula/luno-mcp.rb
-          sed -i "s/PLACEHOLDER_LINUX_ARM64_SHA256/${{ steps.shas.outputs.linux_arm64 }}/" Formula/luno-mcp.rb
-          sed -i "s/PLACEHOLDER_LINUX_AMD64_SHA256/${{ steps.shas.outputs.linux_amd64 }}/" Formula/luno-mcp.rb
+
+          # Update version
+          sed -i "s/version \"[^\"]*\"/version \"${VERSION}\"/" Formula/luno-mcp.rb
+
+          # Update sha256 by matching the URL line for each platform, then replacing
+          # the sha256 on the following line. This works for both initial placeholders
+          # and subsequent updates where real SHA values are already present.
+          update_sha() {
+            local pattern="$1"
+            local sha="$2"
+            awk -v p="$pattern" -v s="$sha" '
+              $0 ~ p { found=1 }
+              found && /sha256/ { sub(/"[^"]+"/, "\"" s "\""); found=0 }
+              { print }
+            ' Formula/luno-mcp.rb > /tmp/formula.tmp && mv /tmp/formula.tmp Formula/luno-mcp.rb
+          }
+
+          update_sha "luno-mcp-darwin-arm64.tar.gz" "${{ steps.shas.outputs.darwin_arm64 }}"
+          update_sha "luno-mcp-darwin-amd64.tar.gz" "${{ steps.shas.outputs.darwin_amd64 }}"
+          update_sha "luno-mcp-linux-arm64.tar.gz" "${{ steps.shas.outputs.linux_arm64 }}"
+          update_sha "luno-mcp-linux-amd64.tar.gz" "${{ steps.shas.outputs.linux_amd64 }}"
 
       - name: Commit and push
         run: |
+          set -eo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/luno-mcp.rb
